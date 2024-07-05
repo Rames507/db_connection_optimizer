@@ -1,0 +1,184 @@
+import datetime as dt
+import locale
+import logging
+import pathlib
+from time import sleep
+
+import bs4
+import pandas as pd
+from selenium import webdriver
+from selenium.common.exceptions import NoSuchElementException
+from selenium.webdriver.common.by import By
+
+from src.xpath_soup import xpath_soup
+
+logger = logging.getLogger(__name__)
+
+
+class Connection:
+    def __init__(self, connection_table: pd.DataFrame):
+        """
+        A wrapper around the connection_table dataframe
+        :param connection_table:
+        """
+        self.connection_table = connection_table
+
+    def to_json(self, path):
+        self.connection_table.to_json(path, orient="records", indent=4)
+
+    def to_csv(self, path):
+        self.connection_table.to_csv(path)
+
+
+class DBScraper:
+    def __init__(self, *, headless: bool = True):
+        self.driver = None
+        self.headless = headless
+
+    def __enter__(self):
+        self.driver = self.setup_driver(self.headless)
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.driver.close()
+
+    @staticmethod
+    def setup_driver(headless: bool):
+        logger.info("Initializing webdriver.")
+        options = webdriver.FirefoxOptions()
+        options.binary_location = str(
+            pathlib.Path(r"C:\Program Files\Mozilla Firefox\firefox.exe").resolve()
+        )
+        if headless:
+            options.add_argument("-headless")
+
+        service = webdriver.FirefoxService(
+            executable_path=str(pathlib.Path(f"{__file__}/../../driver/geckodriver.exe").resolve())
+        )
+
+        driver = webdriver.Firefox(options=options, service=service)
+
+        for extension in pathlib.Path(f"{__file__}/../../extensions/").iterdir():
+            driver.install_addon(str(extension))
+
+        driver.implicitly_wait(20)
+        return driver
+
+    def get_connection(
+        self, origin: str, destination: str, days: int, return_trip: bool = True
+    ) -> Connection:
+        conn: list[tuple[dt.date, float]] = self._get_connection(
+            origin, destination, days
+        )
+        if return_trip:
+            # seems like the simplest way to reset the local storage (gets rid of date position)
+            self.driver.close()
+            self.driver = self.setup_driver(headless=self.headless)
+            return_conn: list[tuple[dt.date, float]] = self._get_connection(
+                destination, origin, days
+            )
+
+            trip_dataframe = pd.DataFrame(conn, columns=("date", "trip"))
+            trip_dataframe["return_trip"] = list(zip(*return_conn))[1]
+
+        else:
+            trip_dataframe = pd.DataFrame(conn, columns=("date", "trip"))
+
+        return Connection(trip_dataframe)
+
+    def _get_connection(
+        self, origin: str, destination: str, days: int
+    ) -> list[tuple[dt.date, float]]:
+        logger.info(f'Querying connection. ({origin} --> {destination}; days: {days})')
+
+        self.initial_search(origin, destination)
+        sleep(1)
+        best_prices: list[tuple[dt.date, float]] = []
+        for i in range(days):
+            logger.info(f"Retrieving price data {i + 1}/{days}")
+
+            best_prices.append(self.get_best_price(self.driver.page_source))
+            next_page_btn = self.driver.find_element(
+                By.CSS_SELECTOR, "span.icon-next2:nth-child(2)"
+            )
+            next_page_btn.click()
+            # this makes sure we wait until the page is fully loaded, the element itself is not relevant
+            try:
+                _ = self.driver.find_element(
+                    By.CSS_SELECTOR, ".tagesbestpreis-intervall--selected"
+                )
+            except NoSuchElementException:
+                # hope the page will load if we wait a bit longer
+                sleep(15)
+            sleep(0.5)
+
+        best_prices.append(self.get_best_price(self.driver.page_source))
+
+        return best_prices
+
+    @staticmethod
+    def get_best_price(page) -> tuple[dt.date, float]:
+        soup = bs4.BeautifulSoup(page, features="lxml")
+
+        price_btns = soup.find_all(
+            "span", class_="tagesbestpreis-intervall__button-text"
+        )
+        price_strs = [price_btn.text for price_btn in price_btns]
+        prices = [float(price.split("€")[-1]) for price in price_strs]
+
+        date_str = soup.find("div", class_="db-web-date-scroller__date").text
+        day, month, year = date_str.split()[1:]
+        day = f"{day.strip('.'):0>2}"
+
+        locale.setlocale(locale.LC_ALL, "en_US")
+        date = dt.datetime.strptime(f"{day} {month} {year}", r"%d %b %Y").date()
+        locale.setlocale(locale.LC_ALL, "")
+
+        return date, min(prices)
+
+    def initial_search(self, origin, destination):
+        self.driver.get("https://int.bahn.de/en/")
+        origin_input = self.driver.find_element(By.NAME, "quickFinderBasic-von")
+        dest_input = self.driver.find_element(By.NAME, "quickFinderBasic-nach")
+
+        origin_input.send_keys(origin)
+        dest_input.send_keys(destination)
+
+        time_selector = self.driver.find_element(
+            By.CLASS_NAME, "quick-finder-option-area__heading"
+        )
+        time_selector.click()
+        sleep(0.5)
+
+        soup: bs4.BeautifulSoup = bs4.BeautifulSoup(
+            self.driver.page_source, features="lxml"
+        )
+
+        current_day = soup.find(
+            "div",
+            class_="db-web-date-picker-calendar-day db-web-date-picker-calendar-day--day-in-month-or-selectable "
+            "db-web-date-picker-calendar-day--selected-date db-web-date-picker-calendar-day--current-date",
+        )
+        next_day = current_day.next_sibling
+        self.driver.find_element(By.XPATH, xpath_soup(next_day)).click()  # noqa
+
+        accept_btn = self.driver.find_element(By.CSS_SELECTOR, "._button")
+        accept_btn.click()
+
+        search_btn = self.driver.find_element(
+            By.CSS_SELECTOR,
+            r"button.db-web-button:nth-child(3) > span:nth-child(1) > span:nth-child(1)",
+        )
+
+        search_btn.click()
+        sleep(3)
+
+        self.driver.find_element(
+            By.CSS_SELECTOR,
+            ".db-web-switch-list__button-container--align-top > span:nth-child(2)",
+        ).click()
+        sleep(3)
+
+
+if __name__ == "__main__":
+    pass
