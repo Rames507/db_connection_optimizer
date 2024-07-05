@@ -1,6 +1,7 @@
 import datetime as dt
 import locale
 import logging
+import os.path
 import pathlib
 from time import sleep
 
@@ -29,10 +30,32 @@ class Connection:
     def to_csv(self, path):
         self.connection_table.to_csv(path)
 
+    def to_excel(self, path):
+        self.connection_table.to_excel(path)
+
+
+class DriverError(Exception):
+    """Invalid or missing driver object."""
+
 
 class DBScraper:
-    def __init__(self, *, headless: bool = True):
+    def __init__(self, *, headless: bool = True, context_manager: bool = True):
+        """
+        A Scraper to fetch best prices for a connection from https://int.bahn.de/en
+
+        | Designed for use in a context manager.
+        e.g.::
+
+            with DBScraper(headless=True) as db:
+                pass
+
+        :param headless: Makes the browser instance headless (invisible)
+        :param context_manager: pass 'False' to use outside a context_manager.
+            This will not automatically close the driver.
+        """
         self.driver = None
+        if not context_manager:
+            self.driver = self.setup_driver(headless)
         self.headless = headless
 
     def __enter__(self):
@@ -59,7 +82,9 @@ class DBScraper:
         driver = webdriver.Firefox(options=options, service=service)
 
         for extension in pathlib.Path(f"{__file__}/../../extensions/").iterdir():
-            driver.install_addon(str(extension))
+            file_name, file_ext = os.path.splitext(extension)
+            if file_ext == ".xpi":
+                driver.install_addon(str(extension))
 
         driver.implicitly_wait(20)
         return driver
@@ -67,6 +92,13 @@ class DBScraper:
     def get_connection(
         self, origin: str, destination: str, days: int, return_trip: bool = True
     ) -> Connection:
+        if not self.driver:
+            raise DriverError(
+                "Driver not initialized."
+                "Use in a context manager or pass 'context_manager=False' when initializing DBScraper."
+                "Note that this will not automatically close the driver instance."
+            )
+
         conn: list[tuple[dt.date, float]] = self._get_connection(
             origin, destination, days
         )
