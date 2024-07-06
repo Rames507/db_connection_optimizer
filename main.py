@@ -6,6 +6,5 @@ logging.basicConfig(level=logging.INFO)
 
 
 with DBScraper(headless=True) as db:
-    connection = db.get_connection("München", "Göttingen", 3, True)
-    connection.to_csv("./db_test2.csv")
-
+    connection = db.get_connection("Berlin", "Frankfurt", 7, True)
+    connection.to_excel("./ber-frank.xlsx")

@@ -1,3 +1,3 @@
-from src.scraper import DBScraper
+from src.db_scraper import DBScraper
 
 __all__ = ["DBScraper"]

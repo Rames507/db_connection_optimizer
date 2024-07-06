@@ -11,31 +11,10 @@ from selenium import webdriver
 from selenium.common.exceptions import NoSuchElementException
 from selenium.webdriver.common.by import By
 
+from src.connection import Connection
 from src.xpath_soup import xpath_soup
 
 logger = logging.getLogger(__name__)
-
-
-class Connection:
-    def __init__(self, connection_table: pd.DataFrame):
-        """
-        A wrapper around the connection_table dataframe
-        :param connection_table:
-        """
-        self.connection_table = connection_table
-
-    def to_json(self, path):
-        self.connection_table.to_json(path, orient="records", indent=4)
-
-    def to_csv(self, path):
-        self.connection_table.to_csv(path)
-
-    def to_excel(self, path):
-        self.connection_table.to_excel(path)
-
-
-class DriverError(Exception):
-    """Invalid or missing driver object."""
 
 
 class DBScraper:
@@ -51,7 +30,7 @@ class DBScraper:
 
         :param headless: Makes the browser instance headless (invisible)
         :param context_manager: pass 'False' to use outside a context_manager.
-            This will not automatically close the driver.
+            This will not automatically close the driver. Call 'close()' instead.
         """
         self.driver = None
         if not context_manager:
@@ -63,6 +42,9 @@ class DBScraper:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+
+    def close(self):
         self.driver.close()
 
     @staticmethod
@@ -76,7 +58,9 @@ class DBScraper:
             options.add_argument("-headless")
 
         service = webdriver.FirefoxService(
-            executable_path=str(pathlib.Path(f"{__file__}/../../driver/geckodriver.exe").resolve())
+            executable_path=str(
+                pathlib.Path(f"{__file__}/../../driver/geckodriver.exe").resolve()
+            )
         )
 
         driver = webdriver.Firefox(options=options, service=service)
@@ -96,43 +80,49 @@ class DBScraper:
             raise DriverError(
                 "Driver not initialized."
                 "Use in a context manager or pass 'context_manager=False' when initializing DBScraper."
-                "Note that this will not automatically close the driver instance."
+                "Note that use outside of a context manager will not automatically close the driver instance."
             )
 
-        conn: list[tuple[dt.date, float]] = self._get_connection(
+        columns = ("date", "00-07", "07-10", "10-13", "13-16", "16-19", "19-24")
+
+        conn: list[tuple[dt.date, list[float]]] = self._get_connection(
             origin, destination, days
         )
         if return_trip:
             # seems like the simplest way to reset the local storage (gets rid of date position)
             self.driver.close()
             self.driver = self.setup_driver(headless=self.headless)
-            return_conn: list[tuple[dt.date, float]] = self._get_connection(
+            return_conn: list[tuple[dt.date, list[float]]] = self._get_connection(
                 destination, origin, days
             )
-
-            trip_dataframe = pd.DataFrame(conn, columns=("date", "trip"))
-            trip_dataframe["return_trip"] = list(zip(*return_conn))[1]
-
+            inward_journey = pd.DataFrame(
+                [[c[0], *c[1]] for c in return_conn], columns=columns
+            )
         else:
-            trip_dataframe = pd.DataFrame(conn, columns=("date", "trip"))
+            inward_journey = None
 
-        return Connection(trip_dataframe)
+        outward_journey = pd.DataFrame([[c[0], *c[1]] for c in conn], columns=columns)
+
+        return Connection(origin, destination, outward_journey, inward_journey)
 
     def _get_connection(
         self, origin: str, destination: str, days: int
-    ) -> list[tuple[dt.date, float]]:
-        logger.info(f'Querying connection. ({origin} --> {destination}; days: {days})')
+    ) -> list[tuple[dt.date, list[float]]]:
+        logger.info(f"Querying connection. ({origin} --> {destination}; days: {days})")
 
         self.initial_search(origin, destination)
         sleep(1)
-        best_prices: list[tuple[dt.date, float]] = []
-        for i in range(days):
-            logger.info(f"Retrieving price data {i + 1}/{days}")
+        best_prices: list[tuple[dt.date, list[float]]] = []
+        for i in range(1, days + 1):
+            logger.info(f"Retrieving price data {i}/{days}")
 
-            best_prices.append(self.get_best_price(self.driver.page_source))
+            best_prices.append(self.get_prices(self.driver.page_source))
             next_page_btn = self.driver.find_element(
                 By.CSS_SELECTOR, "span.icon-next2:nth-child(2)"
             )
+            if i == days:
+                # No need to load the next page for the last day.
+                break
             next_page_btn.click()
             # this makes sure we wait until the page is fully loaded, the element itself is not relevant
             try:
@@ -144,12 +134,10 @@ class DBScraper:
                 sleep(15)
             sleep(0.5)
 
-        best_prices.append(self.get_best_price(self.driver.page_source))
-
         return best_prices
 
     @staticmethod
-    def get_best_price(page) -> tuple[dt.date, float]:
+    def get_prices(page) -> tuple[dt.date, list[float]]:
         soup = bs4.BeautifulSoup(page, features="lxml")
 
         price_btns = soup.find_all(
@@ -166,7 +154,7 @@ class DBScraper:
         date = dt.datetime.strptime(f"{day} {month} {year}", r"%d %b %Y").date()
         locale.setlocale(locale.LC_ALL, "")
 
-        return date, min(prices)
+        return date, prices
 
     def initial_search(self, origin, destination):
         self.driver.get("https://int.bahn.de/en/")
@@ -210,6 +198,10 @@ class DBScraper:
             ".db-web-switch-list__button-container--align-top > span:nth-child(2)",
         ).click()
         sleep(3)
+
+
+class DriverError(Exception):
+    """Invalid or missing driver object."""
 
 
 if __name__ == "__main__":
