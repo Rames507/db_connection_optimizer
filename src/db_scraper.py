@@ -114,16 +114,6 @@ class DBScraper:
         sleep(1)
         best_prices: list[tuple[dt.date, list[float]]] = []
         for i in range(1, days + 1):
-            logger.info(f"Retrieving price data {i}/{days}")
-
-            best_prices.append(self.get_prices(self.driver.page_source))
-            next_page_btn = self.driver.find_element(
-                By.CSS_SELECTOR, "span.icon-next2:nth-child(2)"
-            )
-            if i == days:
-                # No need to load the next page for the last day.
-                break
-            next_page_btn.click()
             # this makes sure we wait until the page is fully loaded, the element itself is not relevant
             try:
                 _ = self.driver.find_element(
@@ -132,7 +122,18 @@ class DBScraper:
             except NoSuchElementException:
                 # hope the page will load if we wait a bit longer
                 sleep(15)
-            sleep(0.5)
+
+            sleep(.5)
+
+            logger.info(f"Retrieving price data {i}/{days}")
+
+            best_prices.append(self.get_prices(self.driver.page_source))
+            next_page_btn = self.driver.find_element(
+                By.CSS_SELECTOR, "span.icon-next2:nth-child(2)"
+            )
+            if i < days:
+                # No need to load the next page for the last day.
+                next_page_btn.click()
 
         return best_prices
 
